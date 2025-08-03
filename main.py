@@ -1,10 +1,10 @@
-import uvicorn 
-import logging
-from server import app, HOST, PORT
+import sys
+import os
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("SimpleLocalAIService")
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), 'src')))
 
 if __name__ == "__main__":
-    uvicorn.run("server:app", host=HOST, port=PORT)
-    logger.info(f"Server started at http://{HOST}:{PORT}")
+    from src.main import app, HOST, PORT
+    import uvicorn
+    uvicorn.run("src.server:app", host=HOST, port=PORT, reload=True)
+

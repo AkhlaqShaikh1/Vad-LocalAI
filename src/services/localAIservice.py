@@ -59,26 +59,103 @@ class VADProcessor:
         
         logger.info(f"VAD Processor initialized for channel {channel_id}")
     
-    def apply_noise_reduction(self, audio_data):
-        """Apply basic noise reduction techniques"""
+    # def apply_noise_reduction(self, audio_data):
+    #     """Apply basic noise reduction techniques"""
+    #     try:
+    #         # Apply high-pass filter to remove low-frequency noise
+    #         filtered_audio = filtfilt(self.hp_b, self.hp_a, audio_data)
+            
+    #         # Simple spectral subtraction if we have a noise profile
+    #         if self.noise_profile is not None and len(self.noise_profile) > 0:
+    #             # Very basic noise reduction - subtract average noise level
+    #             noise_level = np.mean(np.abs(self.noise_profile))
+    #             reduced_audio = np.where(np.abs(filtered_audio) > noise_level * 1.5, 
+    #                                    filtered_audio, 
+    #                                    filtered_audio * 0.3)
+    #             return reduced_audio
+            
+    #         return filtered_audio
+            
+    #     except Exception as e:
+    #         logger.warning(f"Noise reduction failed: {e}")
+    #         return audio_data
+
+    def apply_noise_reduction(self, audio_data: np.ndarray) -> np.ndarray:
+        """
+        Apply improved noise reduction using spectral subtraction and high-pass filtering.
+        Works in real-time for small audio chunks.
+        """
         try:
-            # Apply high-pass filter to remove low-frequency noise
+        # Ensure input is valid
+            if len(audio_data) == 0:
+                return audio_data
+
+            # Step 1: High-pass filter to remove low-frequency rumble
             filtered_audio = filtfilt(self.hp_b, self.hp_a, audio_data)
-            
-            # Simple spectral subtraction if we have a noise profile
+
+            # Step 2: Apply spectral subtraction if we have a noise profile
             if self.noise_profile is not None and len(self.noise_profile) > 0:
-                # Very basic noise reduction - subtract average noise level
-                noise_level = np.mean(np.abs(self.noise_profile))
-                reduced_audio = np.where(np.abs(filtered_audio) > noise_level * 1.5, 
-                                       filtered_audio, 
-                                       filtered_audio * 0.3)
-                return reduced_audio
-            
+                frame_size = 512
+                hop_size = 256
+                window = np.hanning(frame_size)
+
+                # Pad audio if too short for at least one frame
+                if len(filtered_audio) < frame_size:
+                    padded_audio = np.pad(filtered_audio, (0, frame_size - len(filtered_audio)))
+                else:
+                    padded_audio = filtered_audio
+
+                # Split into frames
+                frames = [
+                    padded_audio[i:i + frame_size] * window
+                    for i in range(0, len(padded_audio) - frame_size, hop_size)
+                ]
+
+                # FFT of frames
+                stft_frames = [np.fft.rfft(frame) for frame in frames]
+
+                # Compute average noise spectrum
+                noise_frames = [
+                    self.noise_profile[i:i + frame_size] * window
+                    for i in range(0, len(self.noise_profile) - frame_size, hop_size)
+                ]
+                noise_spectrum = np.mean(
+                    [np.abs(np.fft.rfft(nf)) for nf in noise_frames],
+                    axis=0
+                )
+
+                # Spectral subtraction
+                enhanced_frames = []
+                alpha = 1.2  # Over-subtraction factor
+                beta = 0.02  # Spectral floor
+                for spectrum in stft_frames:
+                    magnitude = np.abs(spectrum)
+                    phase = np.angle(spectrum)
+
+                    # Subtract noise estimate
+                    subtracted = magnitude - alpha * noise_spectrum
+                    subtracted = np.maximum(subtracted, beta * magnitude)
+
+                    # Reconstruct spectrum
+                    enhanced_frames.append(subtracted * np.exp(1j * phase))
+
+                # Overlap-add for reconstruction
+                enhanced_signal = np.zeros(len(padded_audio))
+                for i, frame_spec in enumerate(enhanced_frames):
+                    frame_time = np.fft.irfft(frame_spec)
+                    start = i * hop_size
+                    enhanced_signal[start:start + frame_size] += frame_time * window
+
+                # Trim back to original length
+                return enhanced_signal[:len(filtered_audio)]
+
+            # If no noise profile yet, just return filtered audio
             return filtered_audio
-            
+
         except Exception as e:
             logger.warning(f"Noise reduction failed: {e}")
             return audio_data
+
     
     def calculate_features(self, audio_frame):
         """Calculate audio features for VAD"""
@@ -131,8 +208,8 @@ class VADProcessor:
             audio_np = np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32) / 32768.0
             
             # Apply noise reduction
-            if len(audio_np) > 0:
-                audio_np = self.apply_noise_reduction(audio_np)
+            # if len(audio_np) > 0:
+                # audio_np = self.apply_noise_reduction(audio_np)
             
             # Check if this frame contains speech
             contains_speech = self.is_speech_frame(audio_np)
@@ -242,7 +319,7 @@ def initialize_whisper_model():
     global model
     try:
         logger.info("Loading faster-whisper model...")
-        model = WhisperModel("large-v3", device="cuda", compute_type="float16")
+        model = WhisperModel("large-v2", device="cuda", compute_type="float16")
         logger.info("faster-whisper model loaded successfully")
     except Exception as e:
         logger.error(f"Error loading whisper model: {e}")
@@ -268,7 +345,7 @@ async def transcribe_audio_segment(audio_np):
             audio_np, 
             beam_size=10,
             vad_filter=True,  # Enable Whisper's built-in VAD
-            vad_parameters=dict(min_silence_duration_ms=200)
+            vad_parameters=dict(min_silence_duration_ms=500)
         )
         
         # Extract text from segments

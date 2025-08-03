@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Real-Time Speech Recognition Demo</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            background: white;
+            padding: 30px;
+            border-radius: 10px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        .controls {
+            margin: 20px 0;
+            text-align: center;
+        }
+        button {
+            padding: 12px 24px;
+            margin: 5px;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 16px;
+        }
+        .connect { background-color: #4CAF50; color: white; }
+        .disconnect { background-color: #f44336; color: white; }
+        .status {
+            padding: 15px;
+            margin: 10px 0;
+            border-radius: 5px;
+            background-color: #e3f2fd;
+            border-left: 4px solid #2196F3;
+        }
+        .transcription {
+            padding: 15px;
+            margin: 10px 0;
+            border-radius: 5px;
+            background-color: #f3e5f5;
+            border-left: 4px solid #9c27b0;
+            min-height: 100px;
+        }
+        .log {
+            background-color: #f5f5f5;
+            padding: 10px;
+            border-radius: 5px;
+            max-height: 200px;
+            overflow-y: auto;
+            font-family: monospace;
+            font-size: 12px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🎤 Real-Time Speech Recognition Demo</h1>
+        
+        <div class="controls">
+            <button id="connectBtn" class="connect">Connect & Start Recording</button>
+            <button id="disconnectBtn" class="disconnect" disabled>Disconnect</button>
+        </div>
+        
+        <div class="status" id="status">
+            Status: Not connected
+        </div>
+        
+        <div class="transcription" id="transcription">
+            <strong>Transcriptions will appear here...</strong>
+        </div>
+        
+        <h3>Debug Log:</h3>
+        <div class="log" id="log"></div>
+    </div>
+
+    <script>
+        let websocket = null;
+        let mediaRecorder = null;
+        let audioContext = null;
+        let processor = null;
+        
+        const connectBtn = document.getElementById('connectBtn');
+        const disconnectBtn = document.getElementById('disconnectBtn');
+        const statusDiv = document.getElementById('status');
+        const transcriptionDiv = document.getElementById('transcription');
+        const logDiv = document.getElementById('log');
+        
+        function log(message) {
+            const timestamp = new Date().toLocaleTimeString();
+            logDiv.innerHTML += `[${timestamp}] ${message}<br>`;
+            logDiv.scrollTop = logDiv.scrollHeight;
+            console.log(message);
+        }
+        
+        function updateStatus(message) {
+            statusDiv.textContent = message;
+            log(`Status: ${message}`);
+        }
+        
+        function addTranscription(text) {
+            const timestamp = new Date().toLocaleTimeString();
+            transcriptionDiv.innerHTML += `<div><strong>[${timestamp}]</strong> ${text}</div>`;
+            log(`Transcription: ${text}`);
+        }
+        
+        async function connect() {
+            try {
+                // Request microphone access
+                const stream = await navigator.mediaDevices.getUserMedia({ 
+                    audio: {
+                        sampleRate: 16000,
+                        channelCount: 1,
+                        echoCancellation: true,
+                        noiseSuppression: true
+                    } 
+                });
+                
+                // Create WebSocket connection
+                const channelId = 'demo_' + Math.random().toString(36).substr(2, 9);
+                websocket = new WebSocket(`ws://127.0.0.1:8080/ws?channel_id=${channelId}`);
+                
+                websocket.onopen = () => {
+                    log('WebSocket connected');
+                    connectBtn.disabled = true;
+                    disconnectBtn.disabled = false;
+                };
+                
+                websocket.onmessage = (event) => {
+                    const message = event.data;
+                    if (message.startsWith('Status: ')) {
+                        updateStatus(message.substring(8));
+                    } else if (message.startsWith('Transcription: ')) {
+                        addTranscription(message.substring(15));
+                    } else {
+                        log(`Received: ${message}`);
+                    }
+                };
+                
+                websocket.onerror = (error) => {
+                    log('WebSocket error: ' + error);
+                };
+                
+                websocket.onclose = () => {
+                    log('WebSocket disconnected');
+                    connectBtn.disabled = false;
+                    disconnectBtn.disabled = true;
+                    updateStatus('Disconnected');
+                };
+                
+                // Set up audio processing
+                audioContext = new AudioContext({ sampleRate: 16000 });
+                const source = audioContext.createMediaStreamSource(stream);
+                
+                // Create a ScriptProcessorNode for audio processing
+                processor = audioContext.createScriptProcessor(4096, 1, 1);
+                
+                processor.onaudioprocess = (event) => {
+                    if (websocket && websocket.readyState === WebSocket.OPEN) {
+                        const inputBuffer = event.inputBuffer;
+                        const inputData = inputBuffer.getChannelData(0);
+                        
+                        // Convert to 16-bit PCM
+                        const pcmData = new Int16Array(inputData.length);
+                        for (let i = 0; i < inputData.length; i++) {
+                            pcmData[i] = Math.max(-32768, Math.min(32767, inputData[i] * 32768));
+                        }
+                        
+                        // Convert to base64
+                        const base64Audio = btoa(String.fromCharCode(...new Uint8Array(pcmData.buffer)));
+                        
+                        // Send to WebSocket
+                        websocket.send(JSON.stringify({
+                            type: "input_audio_buffer.append",
+                            audio: base64Audio
+                        }));
+                    }
+                };
+                
+                source.connect(processor);
+                processor.connect(audioContext.destination);
+                
+                log('Audio processing started');
+                
+            } catch (error) {
+                log('Error: ' + error.message);
+                updateStatus('Error: ' + error.message);
+            }
+        }
+        
+        function disconnect() {
+            if (websocket) {
+                websocket.close();
+            }
+            if (processor) {
+                processor.disconnect();
+            }
+            if (audioContext) {
+                audioContext.close();
+            }
+            
+            connectBtn.disabled = false;
+            disconnectBtn.disabled = true;
+            updateStatus('Disconnected');
+            log('Disconnected and cleaned up');
+        }
+        
+        connectBtn.addEventListener('click', connect);
+        disconnectBtn.addEventListener('click', disconnect);
+        
+        // Initial status
+        updateStatus('Ready to connect');
+        log('Demo loaded. Click "Connect & Start Recording" to begin.');
+    </script>
+</body>
+</html>

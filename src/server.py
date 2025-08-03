@@ -1,5 +1,6 @@
 from fastapi import FastAPI
 import logging
+from src.utils.logging import logger
 import src.configuration.config
 from src.services.localAIservice import router as websocket_router
 
